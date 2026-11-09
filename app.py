@@ -98,94 +98,92 @@ def dismiss_alerts(driver):
 
 
 # ==========================================
-# 2. CSI 초고속 자동 로그인
+# 2. CSI 견고한 초고속 자동 로그인 (StaleElementReference 방지)
 # ==========================================
 def login_to_csi(driver, user_id, user_pw):
     driver.get("https://www.csi.go.kr/main.do")
     dismiss_alerts(driver)
 
-    id_selectors = [
-        "input[name='user_id']",
-        "input[name='userId']",
-        "input#user_id",
-        "input#userId",
-        "input[placeholder*='아이디']",
-    ]
-    pw_selectors = [
-        "input[name='pswd']",
-        "input[name='password']",
-        "input[name='user_pw']",
-        "input[type='password']",
-    ]
+    # 1. 자바스크립트로 DOM 갱신과 무관하게 입력창에 값 직접 주입
+    js_login_script = """
+    var uid = arguments[0];
+    var upw = arguments[1];
 
-    id_input = None
-    # 최대 5초간 입력창 대기
+    var idEl = document.querySelector('input[name="user_id"], input[name="userId"], input#user_id, input#userId, input[placeholder*="아이디"]');
+    var pwEl = document.querySelector('input[name="pswd"], input[name="password"], input[name="user_pw"], input[type="password"]');
+
+    if (!idEl || !pwEl) {
+        // 혹시 팝업/버튼으로 열어야 하는 경우
+        var loginBtn = document.querySelector('a.login-btn, a[href*="login"], button.login-btn');
+        if (loginBtn) { loginBtn.click(); }
+        idEl = document.querySelector('input[name="user_id"], input[name="userId"], input#user_id, input#userId, input[placeholder*="아이디"]');
+        pwEl = document.querySelector('input[name="pswd"], input[name="password"], input[name="user_pw"], input[type="password"]');
+    }
+
+    if (idEl && pwEl) {
+        idEl.value = uid;
+        idEl.dispatchEvent(new Event('input', { bubbles: true }));
+        idEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+        pwEl.value = upw;
+        pwEl.dispatchEvent(new Event('input', { bubbles: true }));
+        pwEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+        // 로그인 실행
+        if (typeof go_login === 'function') {
+            go_login();
+            return 'submitted_func';
+        } else if (document.forms['loginForm']) {
+            document.forms['loginForm'].submit();
+            return 'submitted_form';
+        } else {
+            var submitBtn = document.querySelector('button[type="submit"], input[type="submit"], .btn-login, a.btn-login');
+            if (submitBtn) { submitBtn.click(); return 'submitted_btn'; }
+        }
+        return 'inputs_filled';
+    }
+    return 'not_found';
+    """
+
+    # 최대 6초간 로그인 시도
     start_t = time.time()
-    while time.time() - start_t < 5.0:
-        for sel in id_selectors:
-            elems = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
-            if elems:
-                id_input = elems[0]
+    res = 'not_found'
+    while time.time() - start_t < 6.0:
+        try:
+            res = driver.execute_script(js_login_script, user_id, user_pw)
+            if res != 'not_found':
                 break
-        if id_input:
-            break
-        time.sleep(0.3)
+        except Exception:
+            pass
+        time.sleep(0.4)
 
-    if not id_input:
-        login_btns = driver.find_elements(
-            By.XPATH, "//a[contains(text(), '로그인')] | //button[contains(text(), '로그인')]"
-        )
-        for btn in login_btns:
-            if btn.is_displayed():
-                try:
-                    driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(0.5)
-                except Exception:
-                    pass
-                break
-        for sel in id_selectors:
-            elems = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
-            if elems:
-                id_input = elems[0]
-                break
+    if res == 'inputs_filled':
+        try:
+            # Enter 키 전송
+            pw_elements = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+            if pw_elements:
+                pw_elements[0].send_keys(Keys.RETURN)
+        except Exception:
+            pass
 
-    pw_input = None
-    for sel in pw_selectors:
-        elems = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
-        if elems:
-            pw_input = elems[0]
-            break
-
-    if not id_input or not pw_input:
-        return False, "로그인 입력창을 찾지 못했습니다. CSI 접속 상태를 확인해주세요."
-
-    id_input.clear()
-    id_input.send_keys(user_id)
-    pw_input.clear()
-    pw_input.send_keys(user_pw)
-
-    try:
-        driver.execute_script("if(typeof go_login === 'function') { go_login(); }")
-    except Exception:
-        pass
-
-    pw_input.send_keys(Keys.RETURN)
-
-    # 로그인 성공 문구가 뜰 때까지 조건부 대기 (최대 6초)
+    # 로그인 성공 문구가 뜰 때까지 조건부 대기 (최대 7초)
     wait_start = time.time()
-    while time.time() - wait_start < 6.0:
+    while time.time() - wait_start < 7.0:
         alert_msg = dismiss_alerts(driver)
         if alert_msg:
             return False, f"CSI 알림: {alert_msg}"
-        html = driver.page_source
-        if "님으로 로그인" in html or "로그아웃" in html or "go_logout" in html:
-            soup = BeautifulSoup(html, "html.parser")
-            user_span = soup.find("span", class_="username")
-            welcome_txt = user_span.get_text(strip=True) if user_span else "로그인 성공"
-            return True, welcome_txt
+        try:
+            html = driver.page_source
+            if "님으로 로그인" in html or "로그아웃" in html or "go_logout" in html:
+                soup = BeautifulSoup(html, "html.parser")
+                user_span = soup.find("span", class_="username")
+                welcome_txt = user_span.get_text(strip=True) if user_span else "로그인 성공"
+                return True, welcome_txt
+        except Exception:
+            pass
         time.sleep(0.4)
 
-    return False, "로그인 응답이 지연되었습니다. 아이디와 비밀번호를 확인해주세요."
+    return False, "로그인 완료 상태를 확인하지 못했습니다. 아이디와 비밀번호를 다시 확인해주세요."
 
 
 # ==========================================
