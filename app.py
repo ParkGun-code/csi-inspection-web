@@ -932,7 +932,11 @@ def generate_excel_bytes(collected_sites):
 # 7. 상세 페이지 탭 전환 및 파싱
 # ==========================================
 def parse_detail_page(driver):
-    time.sleep(0.6)
+    """
+    상세 화면에서 '현장점검 결과(#cnfrmnView)' 탭을 100% 확실하게 활성화하고 내용을 파싱합니다.
+    CSI 내부의 ajaxTabLoad 함수를 직접 호출하거나 해시를 변경해 비동기 HTML을 완벽히 주입합니다.
+    """
+    time.sleep(0.5)
 
     iframes = driver.find_elements(By.TAG_NAME, "iframe")
     in_iframe = False
@@ -943,28 +947,50 @@ def parse_detail_page(driver):
         except Exception:
             pass
 
-    try:
-        tab_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='#cnfrmnView']")
-        if tab_links:
-            parent_li = tab_links[0].find_element(By.XPATH, "./..")
-            li_class = parent_li.get_attribute("class") or ""
-            if "active" not in li_class:
-                driver.execute_script("arguments[0].click();", tab_links[0])
-            else:
-                tab_div = driver.find_elements(By.CSS_SELECTOR, "#tab table")
-                if not tab_div:
-                    driver.execute_script(
-                        "window.location.hash = '#cnfrmnView'; window.onhashchange && window.onhashchange();"
-                    )
+    # 1. 자바스크립트로 #cnfrmnView 탭 활성화 및 loadTab / ajaxTabLoad 직접 강제 실행
+    force_tab_script = """
+    // (1) 탭 앵커 클릭 시도
+    var cnfrmnLink = document.querySelector('a[href*="#cnfrmnView"]');
+    if (cnfrmnLink) {
+        cnfrmnLink.click();
+    }
+    // (2) 해시 변경
+    window.location.hash = '#cnfrmnView';
 
-        # 3개 이상의 테이블이 로딩될 때까지 대기
-        start_w = time.time()
-        while time.time() - start_w < 6.0:
-            if len(driver.find_elements(By.CSS_SELECTOR, "#tab table")) >= 3:
-                break
-            time.sleep(0.3)
+    // (3) CSI 내부 loadTab 함수가 정의되어 있다면 직접 호출
+    if (typeof loadTab === 'function') {
+        loadTab('#cnfrmnView');
+    } else if (typeof ajaxTabLoad === 'function') {
+        var $main = window.jQuery ? window.jQuery('form#main') : null;
+        if ($main) {
+            var params = {
+                spt_no: $main.find('input[name="spt_no"]').val(),
+                chck_odr: $main.find('input[name="chck_odr"]').val(),
+                const_no: $main.find('input[name="const_no"]').val(),
+                mgm_pmsrgst_pk: $main.find('input[name="mgm_pmsrgst_pk"]').val(),
+                pjt_cd: $main.find('input[name="pjt_cd"]').val(),
+                tabId: '#cnfrmnView',
+                select_b: $main.find('input[name="select_b"]').val()
+            };
+            ajaxTabLoad('#cnfrmnView', '/spt/preCnfrmnViewInc.do');
+        }
+    }
+    """
+    try:
+        driver.execute_script(force_tab_script)
     except Exception:
         pass
+
+    # 2. #tab 안에 실제 '현장점검 확인서' 또는 '시공업체' 또는 '점검결과(#accordion)' 내용이 들어올 때까지 대기 (최대 7초)
+    wait_start = time.time()
+    while time.time() - wait_start < 7.0:
+        try:
+            page_src = driver.page_source
+            if ("현장점검 확인서" in page_src and "시공업체" in page_src) or "accordion" in page_src:
+                break
+        except Exception:
+            pass
+        time.sleep(0.4)
 
     html = driver.page_source
 
