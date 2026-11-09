@@ -15,7 +15,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 
@@ -42,7 +42,7 @@ st.markdown(
 
 
 # ==========================================
-# 1. 크롬 브라우저 생성 (클라우드 서버 & 로컬 PC 모두 자동 호환)
+# 1. 크롬 브라우저 생성 (클라우드 서버 & 로컬 PC 자동 호환)
 # ==========================================
 def create_driver(headless=True):
     options = webdriver.ChromeOptions()
@@ -61,7 +61,6 @@ def create_driver(headless=True):
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    # 리눅스 클라우드 서버(Streamlit Cloud 등)의 Chromium 경로 자동 감지
     chromium_paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
     driver_paths = ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]
 
@@ -82,7 +81,6 @@ def create_driver(headless=True):
 
 
 def dismiss_alerts(driver):
-    """알림창(alert)이 떠 있으면 텍스트를 반환하고 닫습니다."""
     try:
         alert = driver.switch_to.alert
         txt = alert.text
@@ -96,14 +94,10 @@ def dismiss_alerts(driver):
 # 2. CSI 자동 로그인 및 검색 제어 함수
 # ==========================================
 def login_to_csi(driver, user_id, user_pw):
-    """
-    CSI 메인/로그인 페이지에 접속하여 일반 아이디/비밀번호로 로그인합니다.
-    """
     driver.get("https://www.csi.go.kr/main.do")
     time.sleep(2.0)
     dismiss_alerts(driver)
 
-    # 아이디/비밀번호 입력창 탐색 (다양한 선택자 대응)
     id_selectors = [
         "input[name='user_id']",
         "input[name='userId']",
@@ -128,7 +122,6 @@ def login_to_csi(driver, user_id, user_pw):
             id_input = elems[0]
             break
 
-    # 만약 메인 화면에 로그인 창이 접혀 있거나 버튼으로 열리는 경우 클릭 시도
     if not id_input:
         login_open_btns = driver.find_elements(
             By.XPATH, "//a[contains(text(), '로그인')] | //button[contains(text(), '로그인')]"
@@ -162,7 +155,6 @@ def login_to_csi(driver, user_id, user_pw):
     pw_input.clear()
     pw_input.send_keys(user_pw)
 
-    # 로그인 실행 (go_login 함수 또는 Enter 키 또는 로그인 버튼 클릭)
     try:
         driver.execute_script("if(typeof go_login === 'function') { go_login(); }")
     except Exception:
@@ -173,7 +165,6 @@ def login_to_csi(driver, user_id, user_pw):
     if alert_msg:
         return False, f"CSI 알림: {alert_msg}"
 
-    # 아직 페이지가 안 넘어갔다면 Enter 또는 버튼 클릭
     if "님으로 로그인" not in driver.page_source and "로그아웃" not in driver.page_source:
         try:
             pw_input.send_keys(Keys.RETURN)
@@ -195,37 +186,77 @@ def login_to_csi(driver, user_id, user_pw):
     return False, "로그인 후 사용자 정보를 확인할 수 없습니다. 아이디와 비밀번호를 다시 확인해주세요."
 
 
+def get_available_inspection_orgs(driver):
+    """
+    CSI 목록 화면에 렌더링된 '현장점검 기관' 드롭다운(select) 옵션 목록을 가져옵니다.
+    """
+    org_list = []
+    try:
+        select_candidates = driver.find_elements(
+            By.CSS_SELECTOR,
+            "select[name*='inst'], select[name*='agency'], select[name*='org'], select#inst_cd, select#chck_inst",
+        )
+        for sel in select_candidates:
+            options = sel.find_elements(By.TAG_NAME, "option")
+            texts = [o.text.strip() for o in options if o.text.strip()]
+            if any(k in " ".join(texts) for k in ["국토교통부", "관리원", "지방국토", "한국토지주택공사", "도로공사", "철도"]):
+                for opt in options:
+                    t = opt.text.strip()
+                    v = opt.get_attribute("value") or ""
+                    if t and t not in [x[0] for x in org_list]:
+                        org_list.append((t, v))
+                break
+    except Exception:
+        pass
+    return org_list
+
+
 def navigate_and_search(driver, target_list_url, search_params):
-    """
-    점검완료(/spt/sptEndList.do) 또는 점검대상(/spt/sptTrgtList.do) 페이지로 이동하여
-    사용자가 지정한 검색 조건을 폼에 반영하고 검색을 수행합니다.
-    """
     driver.get(target_list_url)
     time.sleep(2.0)
     dismiss_alerts(driver)
 
-    # 검색 폼 필드 채우기 (자바스크립트로 안전하게 값 주입)
+    # 1. 셀렉트 박스(현장점검 기관 등) 또는 텍스트 입력창 자동 선택/주입 스크립트
     js_set_fields = """
     var params = arguments[0];
+    var orgName = params['chck_inst_nm'] || '';
+
+    // 현장점검 기관 드롭다운 처리
+    if (orgName) {
+        var selects = document.querySelectorAll('select');
+        for (var s = 0; s < selects.length; s++) {
+            var sel = selects[s];
+            for (var o = 0; o < sel.options.length; o++) {
+                if (sel.options[o].text.indexOf(orgName) >= 0) {
+                    sel.selectedIndex = o;
+                    sel.value = sel.options[o].value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                }
+            }
+        }
+    }
+
+    // 일반 파라미터 폼 필드 입력
     for (var key in params) {
         var val = params[key];
         if (!val) continue;
         var elems = document.querySelectorAll('[name="' + key + '"], #' + key);
         for (var i = 0; i < elems.length; i++) {
             elems[i].value = val;
+            elems[i].dispatchEvent(new Event('change', { bubbles: true }));
         }
     }
     """
     driver.execute_script(js_set_fields, search_params)
     time.sleep(0.3)
 
-    # 검색 버튼 클릭 또는 goPage(1) / search 함수 호출
+    # 2. 검색 버튼 클릭
     searched = False
     search_btns = driver.find_elements(
         By.XPATH,
         "//button[contains(., '검색')] | //a[contains(., '검색')] | //input[@type='button' and contains(@value, '검색')] | //input[@type='submit' and contains(@value, '검색')]",
     )
-    # 상단 통합검색 버튼(go_sch_search)은 제외하고 본문 검색 버튼만 선택
     for btn in search_btns:
         onclick_attr = btn.get_attribute("onclick") or ""
         title_attr = btn.get_attribute("title") or ""
@@ -260,10 +291,6 @@ def navigate_and_search(driver, target_list_url, search_params):
 # 3. 전체 페이지 수 및 현재 목록 미리보기 추출
 # ==========================================
 def get_total_page_info(driver):
-    """
-    <div class="help-inline"> ( 1 / 92 페이지) / 총 915개</div>
-    구조에서 전체 페이지 수와 총 건수를 추출합니다.
-    """
     try:
         html = driver.page_source
         soup = BeautifulSoup(html, "html.parser")
@@ -281,7 +308,6 @@ def get_total_page_info(driver):
 
 
 def get_current_page_list_preview(driver):
-    """현재 페이지의 현장 목록 테이블을 읽어 미리보기용 리스트로 반환합니다."""
     rows_preview = []
     try:
         raw_rows = driver.find_elements(
@@ -839,9 +865,6 @@ def build_column_schema_and_rows(collected_sites):
 
 
 def generate_excel_bytes(collected_sites):
-    """
-    수집된 현장 리스트를 엑셀 바이너리(BytesIO)로 생성하여 웹에서 즉시 다운로드할 수 있게 반환합니다.
-    """
     col_defs, rows_data = build_column_schema_and_rows(collected_sites)
 
     wb = openpyxl.Workbook()
@@ -994,6 +1017,8 @@ if "preview_rows" not in st.session_state:
     st.session_state.preview_rows = []
 if "collected_sites" not in st.session_state:
     st.session_state.collected_sites = []
+if "discovered_orgs" not in st.session_state:
+    st.session_state.discovered_orgs = []
 
 
 # ==========================================
@@ -1044,6 +1069,13 @@ with tab_auto:
                                 st.session_state.driver = drv
                                 st.session_state.logged_in = True
                                 st.session_state.user_welcome = msg
+                                # 로그인 직후 점검완료 페이지에서 '현장점검 기관' 드롭다운 옵션 자동 탐색
+                                try:
+                                    drv.get("https://www.csi.go.kr/spt/sptEndList.do")
+                                    time.sleep(1.5)
+                                    st.session_state.discovered_orgs = get_available_inspection_orgs(drv)
+                                except Exception:
+                                    pass
                                 st.success(f"✅ 로그인 완료: {msg}")
                                 st.rerun()
                             else:
@@ -1070,18 +1102,52 @@ with tab_auto:
                     st.session_state.total_pages = 0
                     st.session_state.total_items = 0
                     st.session_state.preview_rows = []
+                    st.session_state.discovered_orgs = []
                     st.rerun()
 
     # ----------------------------------------------------
-    # STEP 2: 검색 조건 설정 및 목록 조회
+    # STEP 2: 검색 조건 설정 및 목록 조회 (현장점검 기관 항목 추가)
     # ----------------------------------------------------
     with st.expander("🔍 2단계: 검색 조건 설정 및 대상 조회", expanded=st.session_state.logged_in):
-        c1, c2, c3 = st.columns([1.5, 1.5, 2])
+        # 1줄: 조회 메뉴, 현장점검 기관(주요 검색조건), 지역
+        c1, c_org, c2 = st.columns([1.5, 2.5, 1.5])
         with c1:
             board_type = st.selectbox(
                 "조회 메뉴 선택",
                 ["점검완료 (/spt/sptEndList.do)", "점검대상 (/spt/sptTrgtList.do)"],
             )
+
+        with c_org:
+            # 기본 프리셋 기관 목록 + CSI 사이트에서 자동 읽어온 드롭다운 목록 통합
+            preset_orgs = [
+                "전체 (선택 안함)",
+                "국토교통부",
+                "국토안전관리원",
+                "서울지방국토관리청",
+                "원주지방국토관리청",
+                "대전지방국토관리청",
+                "익산지방국토관리청",
+                "부산지방국토관리청",
+                "한국토지주택공사(LH)",
+                "한국도로공사",
+                "국가철도공단",
+                "한국철도공사",
+                "한국수자원공사",
+                "직접 입력",
+            ]
+            if st.session_state.discovered_orgs:
+                dynamic_labels = [o[0] for o in st.session_state.discovered_orgs if o[0] not in preset_orgs]
+                preset_orgs = ["전체 (선택 안함)"] + dynamic_labels + [p for p in preset_orgs[1:] if p not in dynamic_labels]
+
+            selected_org_choice = st.selectbox("🏛️ 현장점검 기관", preset_orgs)
+            if selected_org_choice == "직접 입력":
+                custom_org_name = st.text_input("현장점검 기관명 직접 입력", placeholder="예: 대전지방국토관리청")
+                chck_inst_val = custom_org_name.strip()
+            elif selected_org_choice == "전체 (선택 안함)":
+                chck_inst_val = ""
+            else:
+                chck_inst_val = selected_org_choice
+
         with c2:
             regions = [
                 "전체",
@@ -1104,18 +1170,19 @@ with tab_auto:
                 "제주",
             ]
             search_region = st.selectbox("지역", regions)
-        with c3:
-            chck_col1, chck_col2 = st.columns(2)
-            with chck_col1:
-                chck_start = st.date_input("현장점검예정일 (시작)", value=date(date.today().year, 1, 1))
-            with chck_col2:
-                chck_end = st.date_input("현장점검예정일 (종료)", value=date.today())
 
-        c4, c5, c6, c7 = st.columns(4)
+        # 2줄: 점검예정일 기간 및 추가 상세 검색어
+        chck_col1, chck_col2, c4, c5 = st.columns(4)
+        with chck_col1:
+            chck_start = st.date_input("현장점검예정일 (시작)", value=date(date.today().year, 1, 1))
+        with chck_col2:
+            chck_end = st.date_input("현장점검예정일 (종료)", value=date.today())
         with c4:
             const_nm = st.text_input("공사명 (선택)", placeholder="검색할 공사명")
         with c5:
             chck_nm = st.text_input("점검명 (선택)", placeholder="예: 8월 건설공사")
+
+        c6, c7 = st.columns(2)
         with c6:
             ord_corp_nm = st.text_input("발주자 (선택)", placeholder="예: 천안시청")
         with c7:
@@ -1128,6 +1195,9 @@ with tab_auto:
                 else "https://www.csi.go.kr/spt/sptTrgtList.do"
             )
             params = {
+                "chck_inst_nm": chck_inst_val,
+                "inst_nm": chck_inst_val,
+                "chck_inst": chck_inst_val,
                 "search_region": "" if search_region == "전체" else search_region,
                 "chck_start_ymd": chck_start.strftime("%Y%m%d") if chck_start else "",
                 "chck_end_ymd": chck_end.strftime("%Y%m%d") if chck_end else "",
@@ -1136,7 +1206,7 @@ with tab_auto:
                 "ord_corp_nm": ord_corp_nm.strip(),
                 "con_corp": con_corp.strip(),
             }
-            with st.spinner("검색 조건을 적용하고 결과 목록을 불러오는 중입니다..."):
+            with st.spinner(f"'{chck_inst_val or '전체'}' 기관 및 설정하신 조건으로 CSI 목록을 검색 중입니다..."):
                 try:
                     t_pages, t_items = navigate_and_search(st.session_state.driver, target_url, params)
                     st.session_state.total_pages = t_pages
