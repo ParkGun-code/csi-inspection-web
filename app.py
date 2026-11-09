@@ -2,7 +2,7 @@ import io
 import os
 import re
 import time
-from datetime import datetime, date
+from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
 
@@ -12,18 +12,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
 
 
 # ==========================================
 # 웹페이지 기본 설정
 # ==========================================
 st.set_page_config(
-    page_title="CSI 현장점검 결과 자동 수집 & 엑셀 변환기",
+    page_title="CSI 현장점검 결과 자동 수집기",
     page_icon="🏗️",
     layout="wide",
 )
@@ -31,9 +29,10 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1450px; }
+    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1400px; }
     .main-title { font-size: 24px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }
     .sub-title { font-size: 13px; color: #475569; margin-bottom: 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
+    .step-card { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -41,32 +40,19 @@ st.markdown(
 
 
 # ==========================================
-# 1. 크롬 브라우저 생성 (화면 표출 모드 기본 지원 + 초고속 로딩 옵션)
+# 1. 크롬 브라우저 생성 (화면 표출 모드)
 # ==========================================
-def create_driver(headless=False):
+def create_driver():
     options = webdriver.ChromeOptions()
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--start-maximized")
 
-    # ⚡ HTML DOM이 완성되면 무거운 배너/이미지/폰트 완료를 기다리지 않고 즉시 반응 (eager 모드)
-    options.page_load_strategy = "eager"
-
-    # ⚡ 불필요한 이미지 렌더링을 차단하여 속도 극대화
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.default_content_setting_values.notifications": 2,
-    }
-    options.add_experimental_option("prefs", prefs)
+    # 브라우저 이미지 로딩 유지 (사람이 화면 볼 때 자연스럽게 렌더링)
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-
-    if headless:
-        options.add_argument("--headless=new")
-        options.add_argument("--window-size=1600,1050")
-    else:
-        options.add_argument("--start-maximized")
 
     chromium_paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
     driver_paths = ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]
@@ -98,22 +84,19 @@ def dismiss_alerts(driver):
 
 
 # ==========================================
-# 2. CSI 견고한 초고속 자동 로그인 (StaleElementReference 방지)
+# 2. CSI 자동 로그인 (선택 사항)
 # ==========================================
-def login_to_csi(driver, user_id, user_pw):
+def auto_login_csi(driver, user_id, user_pw):
     driver.get("https://www.csi.go.kr/main.do")
     dismiss_alerts(driver)
 
-    # 1. 자바스크립트로 DOM 갱신과 무관하게 입력창에 값 직접 주입
-    js_login_script = """
+    js_code = """
     var uid = arguments[0];
     var upw = arguments[1];
-
     var idEl = document.querySelector('input[name="user_id"], input[name="userId"], input#user_id, input#userId, input[placeholder*="아이디"]');
     var pwEl = document.querySelector('input[name="pswd"], input[name="password"], input[name="user_pw"], input[type="password"]');
 
     if (!idEl || !pwEl) {
-        // 혹시 팝업/버튼으로 열어야 하는 경우
         var loginBtn = document.querySelector('a.login-btn, a[href*="login"], button.login-btn');
         if (loginBtn) { loginBtn.click(); }
         idEl = document.querySelector('input[name="user_id"], input[name="userId"], input#user_id, input#userId, input[placeholder*="아이디"]');
@@ -122,145 +105,32 @@ def login_to_csi(driver, user_id, user_pw):
 
     if (idEl && pwEl) {
         idEl.value = uid;
-        idEl.dispatchEvent(new Event('input', { bubbles: true }));
-        idEl.dispatchEvent(new Event('change', { bubbles: true }));
-
         pwEl.value = upw;
-        pwEl.dispatchEvent(new Event('input', { bubbles: true }));
+        idEl.dispatchEvent(new Event('change', { bubbles: true }));
         pwEl.dispatchEvent(new Event('change', { bubbles: true }));
-
-        // 로그인 실행
-        if (typeof go_login === 'function') {
-            go_login();
-            return 'submitted_func';
-        } else if (document.forms['loginForm']) {
-            document.forms['loginForm'].submit();
-            return 'submitted_form';
-        } else {
-            var submitBtn = document.querySelector('button[type="submit"], input[type="submit"], .btn-login, a.btn-login');
-            if (submitBtn) { submitBtn.click(); return 'submitted_btn'; }
-        }
-        return 'inputs_filled';
+        if (typeof go_login === 'function') { go_login(); return true; }
+        if (document.forms['loginForm']) { document.forms['loginForm'].submit(); return true; }
+        return 'filled';
     }
-    return 'not_found';
+    return false;
     """
+    try:
+        driver.execute_script(js_code, user_id, user_pw)
+    except Exception:
+        pass
 
-    # 최대 6초간 로그인 시도
-    start_t = time.time()
-    res = 'not_found'
-    while time.time() - start_t < 6.0:
-        try:
-            res = driver.execute_script(js_login_script, user_id, user_pw)
-            if res != 'not_found':
-                break
-        except Exception:
-            pass
-        time.sleep(0.4)
-
-    if res == 'inputs_filled':
-        try:
-            # Enter 키 전송
-            pw_elements = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
-            if pw_elements:
-                pw_elements[0].send_keys(Keys.RETURN)
-        except Exception:
-            pass
-
-    # 로그인 성공 문구가 뜰 때까지 조건부 대기 (최대 7초)
-    wait_start = time.time()
-    while time.time() - wait_start < 7.0:
-        alert_msg = dismiss_alerts(driver)
-        if alert_msg:
-            return False, f"CSI 알림: {alert_msg}"
-        try:
-            html = driver.page_source
-            if "님으로 로그인" in html or "로그아웃" in html or "go_logout" in html:
-                soup = BeautifulSoup(html, "html.parser")
-                user_span = soup.find("span", class_="username")
-                welcome_txt = user_span.get_text(strip=True) if user_span else "로그인 성공"
-                return True, welcome_txt
-        except Exception:
-            pass
-        time.sleep(0.4)
-
-    return False, "로그인 완료 상태를 확인하지 못했습니다. 아이디와 비밀번호를 다시 확인해주세요."
+    # 비밀번호 엔터 전송
+    try:
+        pw_el = driver.find_elements(By.CSS_SELECTOR, "input[type='password']")
+        if pw_el:
+            pw_el[0].send_keys(Keys.RETURN)
+    except Exception:
+        pass
 
 
 # ==========================================
-# 3. 검색 조건 설정 및 목록 조회
+# 3. 전체 페이지 수 감지
 # ==========================================
-def navigate_and_search(driver, target_list_url, search_params):
-    driver.get(target_list_url)
-    dismiss_alerts(driver)
-
-    js_set_fields = """
-    var params = arguments[0];
-    var orgName = params['chck_inst_nm'] || '';
-
-    if (orgName) {
-        var selects = document.querySelectorAll('select');
-        for (var s = 0; s < selects.length; s++) {
-            var sel = selects[s];
-            for (var o = 0; o < sel.options.length; o++) {
-                if (sel.options[o].text.indexOf(orgName) >= 0) {
-                    sel.selectedIndex = o;
-                    sel.value = sel.options[o].value;
-                    sel.dispatchEvent(new Event('change', { bubbles: true }));
-                    break;
-                }
-            }
-        }
-    }
-
-    for (var key in params) {
-        var val = params[key];
-        if (!val) continue;
-        var elems = document.querySelectorAll('[name="' + key + '"], #' + key);
-        for (var i = 0; i < elems.length; i++) {
-            elems[i].value = val;
-            elems[i].dispatchEvent(new Event('change', { bubbles: true }));
-        }
-    }
-    """
-    driver.execute_script(js_set_fields, search_params)
-    time.sleep(0.2)
-
-    searched = False
-    search_btns = driver.find_elements(
-        By.XPATH,
-        "//button[contains(., '검색')] | //a[contains(., '검색')] | //input[@type='button' and contains(@value, '검색')] | //input[@type='submit' and contains(@value, '검색')]",
-    )
-    for btn in search_btns:
-        onclick_attr = btn.get_attribute("onclick") or ""
-        title_attr = btn.get_attribute("title") or ""
-        if "go_sch_search" in onclick_attr or "통합검색" in title_attr:
-            continue
-        if btn.is_displayed():
-            try:
-                driver.execute_script("arguments[0].click();", btn)
-                searched = True
-                break
-            except Exception:
-                pass
-
-    if not searched:
-        try:
-            driver.execute_script(
-                "if (typeof goSearch === 'function') { goSearch(); } "
-                "else if (typeof fn_search === 'function') { fn_search(); } "
-                "else if (typeof goPage === 'function') { goPage('1'); } "
-                "else if (document.forms['main']) { document.forms['main'].submit(); }"
-            )
-        except Exception:
-            pass
-
-    # 목록 로딩 대기
-    time.sleep(1.5)
-    dismiss_alerts(driver)
-    total_pages, total_items = get_total_page_info(driver)
-    return total_pages, total_items
-
-
 def get_total_page_info(driver):
     try:
         html = driver.page_source
@@ -276,49 +146,8 @@ def get_total_page_info(driver):
     return 1, 0
 
 
-def get_current_page_items_exact(driver):
-    """
-    현재 페이지의 목록 테이블에서 실제 현장 행(No, 텍스트 정보)을 순수 데이터(dict) 형태로 추출합니다.
-    Selenium WebElement를 루프 바깥에 보관하지 않으므로 StaleElementReferenceException이 원천 차단됩니다.
-    """
-    exact_items = []
-    try:
-        tables = driver.find_elements(
-            By.CSS_SELECTOR, "table.table, table.tbl, table.board, table.table-bordered"
-        )
-        for tbl in tables:
-            rows = tbl.find_elements(By.CSS_SELECTOR, "tbody tr")
-            for r_idx, r in enumerate(rows):
-                cols = r.find_elements(By.TAG_NAME, "td")
-                if len(cols) >= 7:
-                    first_txt = cols[0].text.strip()
-                    if first_txt.isdigit():
-                        exact_items.append(
-                            {
-                                "row_index": r_idx,
-                                "list_info": {
-                                    "No": cols[0].text.strip(),
-                                    "공사명": cols[1].text.strip() if len(cols) > 1 else "",
-                                    "점검명": cols[2].text.strip() if len(cols) > 2 else "",
-                                    "공사기간": cols[3].text.strip() if len(cols) > 3 else "",
-                                    "현장주소": cols[4].text.strip() if len(cols) > 4 else "",
-                                    "현장점검예정일": cols[5].text.strip() if len(cols) > 5 else "",
-                                    "현장점검종류": cols[6].text.strip() if len(cols) > 6 else "",
-                                    "발주자": cols[7].text.strip() if len(cols) > 7 else "",
-                                    "목록_시공자": cols[8].text.strip() if len(cols) > 8 else "",
-                                    "지적사항_조치완료": cols[9].text.strip() if len(cols) > 9 else "",
-                                },
-                            }
-                        )
-            if exact_items:
-                break
-    except Exception:
-        pass
-    return exact_items
-
-
 # ==========================================
-# 4. 텍스트 정리 및 테이블 파싱 유틸리티
+# 4. 텍스트 정리 및 테이블 파싱
 # ==========================================
 def clean_text(text):
     if not text:
@@ -383,7 +212,7 @@ def parse_key_value_table(table):
 
 
 # ==========================================
-# 5. 현장점검 결과(#cnfrmnView) HTML 전체 파싱
+# 5. 상세 페이지 HTML 파싱 (현장점검 결과 탭)
 # ==========================================
 def parse_csi_detail_html(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -585,7 +414,36 @@ def parse_csi_detail_html(html):
 
 
 # ==========================================
-# 6. 각 항목 1:1 개별 셀 매핑 스키마 빌더
+# 6. 상세 페이지 '현장점검 결과' 탭 활성화 및 파싱
+# ==========================================
+def parse_detail_page(driver):
+    time.sleep(1.0)
+
+    # 탭 클릭 또는 해시 변경으로 #cnfrmnView 탭 활성화
+    try:
+        driver.execute_script(
+            "var link = document.querySelector('a[href*=\"#cnfrmnView\"]'); "
+            "if(link) { link.click(); } "
+            "window.location.hash = '#cnfrmnView'; "
+            "if(typeof loadTab === 'function') { loadTab('#cnfrmnView'); } "
+            "else if(window.onhashchange) { window.onhashchange(); }"
+        )
+    except Exception:
+        pass
+
+    # 내용 렌더링 대기
+    start_w = time.time()
+    while time.time() - start_w < 6.0:
+        html = driver.page_source
+        if "accordion" in html or "시공업체" in html or "현장점검 확인서" in html:
+            break
+        time.sleep(0.4)
+
+    return parse_csi_detail_html(driver.page_source)
+
+
+# ==========================================
+# 7. 엑셀 스키마 빌더 및 바이트 생성
 # ==========================================
 def build_column_schema_and_rows(collected_sites):
     max_con_cnt = max((len(s["parsed"].get("constructors", [])) for s in collected_sites), default=1) or 1
@@ -929,95 +787,10 @@ def generate_excel_bytes(collected_sites):
 
 
 # ==========================================
-# 7. 상세 페이지 탭 전환 및 파싱
-# ==========================================
-def parse_detail_page(driver):
-    """
-    상세 화면에서 '현장점검 결과(#cnfrmnView)' 탭을 100% 확실하게 활성화하고 내용을 파싱합니다.
-    CSI 내부의 ajaxTabLoad 함수를 직접 호출하거나 해시를 변경해 비동기 HTML을 완벽히 주입합니다.
-    """
-    time.sleep(0.5)
-
-    iframes = driver.find_elements(By.TAG_NAME, "iframe")
-    in_iframe = False
-    if iframes:
-        try:
-            driver.switch_to.frame(iframes[0])
-            in_iframe = True
-        except Exception:
-            pass
-
-    # 1. 자바스크립트로 #cnfrmnView 탭 활성화 및 loadTab / ajaxTabLoad 직접 강제 실행
-    force_tab_script = """
-    // (1) 탭 앵커 클릭 시도
-    var cnfrmnLink = document.querySelector('a[href*="#cnfrmnView"]');
-    if (cnfrmnLink) {
-        cnfrmnLink.click();
-    }
-    // (2) 해시 변경
-    window.location.hash = '#cnfrmnView';
-
-    // (3) CSI 내부 loadTab 함수가 정의되어 있다면 직접 호출
-    if (typeof loadTab === 'function') {
-        loadTab('#cnfrmnView');
-    } else if (typeof ajaxTabLoad === 'function') {
-        var $main = window.jQuery ? window.jQuery('form#main') : null;
-        if ($main) {
-            var params = {
-                spt_no: $main.find('input[name="spt_no"]').val(),
-                chck_odr: $main.find('input[name="chck_odr"]').val(),
-                const_no: $main.find('input[name="const_no"]').val(),
-                mgm_pmsrgst_pk: $main.find('input[name="mgm_pmsrgst_pk"]').val(),
-                pjt_cd: $main.find('input[name="pjt_cd"]').val(),
-                tabId: '#cnfrmnView',
-                select_b: $main.find('input[name="select_b"]').val()
-            };
-            ajaxTabLoad('#cnfrmnView', '/spt/preCnfrmnViewInc.do');
-        }
-    }
-    """
-    try:
-        driver.execute_script(force_tab_script)
-    except Exception:
-        pass
-
-    # 2. #tab 안에 실제 '현장점검 확인서' 또는 '시공업체' 또는 '점검결과(#accordion)' 내용이 들어올 때까지 대기 (최대 7초)
-    wait_start = time.time()
-    while time.time() - wait_start < 7.0:
-        try:
-            page_src = driver.page_source
-            if ("현장점검 확인서" in page_src and "시공업체" in page_src) or "accordion" in page_src:
-                break
-        except Exception:
-            pass
-        time.sleep(0.4)
-
-    html = driver.page_source
-
-    if in_iframe:
-        try:
-            driver.switch_to.default_content()
-        except Exception:
-            pass
-
-    return parse_csi_detail_html(html)
-
-
-# ==========================================
 # 세션 상태 초기화
 # ==========================================
 if "driver" not in st.session_state:
     st.session_state.driver = None
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "user_welcome" not in st.session_state:
-    st.session_state.user_welcome = ""
-if "total_pages" not in st.session_state:
-    st.session_state.total_pages = 0
-if "total_items" not in st.session_state:
-    st.session_state.total_items = 0
-if "preview_rows" not in st.session_state:
-    st.session_state.preview_rows = []
 if "collected_sites" not in st.session_state:
     st.session_state.collected_sites = []
 if "stop_requested" not in st.session_state:
@@ -1027,326 +800,184 @@ if "stop_requested" not in st.session_state:
 # ==========================================
 # 화면 UI 구성
 # ==========================================
-st.markdown("<div class='main-title'>🏗️ CSI 현장점검 결과 자동 수집 & 엑셀 변환 웹앱</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>🏗️ CSI 현장점검 결과 자동 수집 & 엑셀 변환기</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='sub-title'>실시간 브라우저 화면 확인, 10건 누락 방지 신규 탭 격리 수집, 작업 중 정지 및 즉시 저장 지원</div>",
+    "<div class='sub-title'>실시간 크롬 창에서 직접 로그인 및 검색 조건을 설정하고, [수집 시작]을 누르면 원본 파이썬 방식 그대로 자동 순회 수집합니다.</div>",
     unsafe_allow_html=True,
 )
 
-tab_auto, tab_html = st.tabs(["🌐 1. CSI 사이트 직접 연결 수집 (아이디/비밀번호)", "📂 2. 저장된 HTML 파일 즉시 변환"])
+# ----------------------------------------------------
+# 1단계: 브라우저 실행 및 로그인
+# ----------------------------------------------------
+with st.container():
+    st.markdown("### 1️⃣ 브라우저 열기 및 로그인")
+    st.caption("아래 [크롬 브라우저 열기]를 누르면 내 컴퓨터 화면에 실제 크롬 창이 뜹니다. 자동 로그인을 원하시면 아이디/비번을 입력하시고, 직접 로그인하셔도 됩니다.")
 
-with tab_auto:
-    # ----------------------------------------------------
-    # STEP 1: CSI 로그인
-    # ----------------------------------------------------
-    with st.expander("🔑 1단계: CSI 로그인", expanded=not st.session_state.logged_in):
-        col_id, col_pw, col_opt, col_btn = st.columns([2, 2, 2, 1.5])
-        with col_id:
-            csi_id = st.text_input("CSI 아이디", placeholder="아이디 입력", key="csi_id_input")
-        with col_pw:
-            csi_pw = st.text_input("CSI 비밀번호", type="password", placeholder="비밀번호 입력", key="csi_pw_input")
-        with col_opt:
-            is_linux_server = os.path.exists("/usr/bin/chromium") or os.path.exists("/usr/bin/chromedriver")
-            # 내 PC 실행 시 기본값을 False(실제 크롬 창 표출)로 지정하여 화면을 보며 작업할 수 있게 지원
-            headless_mode = st.checkbox(
-                "브라우저 숨김(헤드리스 모드)",
-                value=bool(is_linux_server),
-                help="체크를 해제하면 실제 크롬 창이 눈앞에 떠서 실시간으로 로그인과 수집 화면을 볼 수 있습니다. (리눅스 클라우드 서버는 자동 숨김)",
-                disabled=bool(is_linux_server),
-            )
-        with col_btn:
-            st.write("")
-            if st.button("🚀 CSI 접속 및 로그인", type="primary", use_container_width=True):
-                if not csi_id.strip() or not csi_pw.strip():
-                    st.warning("CSI 아이디와 비밀번호를 입력해주세요.")
-                else:
-                    with st.spinner("CSI(csi.go.kr)에 접속하여 초고속 로그인 중입니다..."):
-                        try:
-                            if st.session_state.driver:
-                                try:
-                                    st.session_state.driver.quit()
-                                except Exception:
-                                    pass
-                            drv = create_driver(headless=headless_mode)
-                            ok, msg = login_to_csi(drv, csi_id.strip(), csi_pw.strip())
-                            if ok:
-                                st.session_state.driver = drv
-                                st.session_state.logged_in = True
-                                st.session_state.user_welcome = msg
-                                st.success(f"✅ 로그인 완료: {msg}")
-                                st.rerun()
-                            else:
-                                drv.quit()
-                                st.session_state.driver = None
-                                st.session_state.logged_in = False
-                                st.error(f"❌ {msg}")
-                        except Exception as e:
-                            st.error(f"❌ 브라우저 실행 오류: {e}")
-
-        if st.session_state.logged_in:
-            col_s1, col_s2 = st.columns([4, 1])
-            with col_s1:
-                st.success(f"🟢 현재 CSI 연결 상태: **{st.session_state.user_welcome}** (브라우저 정상 연동 중)")
-            with col_s2:
-                if st.button("🔌 세션 종료(로그아웃)", use_container_width=True):
-                    if st.session_state.driver:
-                        try:
-                            st.session_state.driver.quit()
-                        except Exception:
-                            pass
-                    st.session_state.driver = None
-                    st.session_state.logged_in = False
-                    st.session_state.total_pages = 0
-                    st.session_state.total_items = 0
-                    st.session_state.preview_rows = []
-                    st.rerun()
-
-    # ----------------------------------------------------
-    # STEP 2: 검색 조건 설정 및 목록 조회
-    # ----------------------------------------------------
-    with st.expander("🔍 2단계: 검색 조건 설정 및 대상 조회", expanded=st.session_state.logged_in):
-        c1, c_org, c2 = st.columns([1.5, 2.5, 1.5])
-        with c1:
-            board_type = st.selectbox(
-                "조회 메뉴 선택",
-                ["점검완료 (/spt/sptEndList.do)", "점검대상 (/spt/sptTrgtList.do)"],
-            )
-
-        with c_org:
-            preset_orgs = [
-                "전체 (선택 안함)",
-                "국토교통부",
-                "국토안전관리원",
-                "서울지방국토관리청",
-                "원주지방국토관리청",
-                "대전지방국토관리청",
-                "익산지방국토관리청",
-                "부산지방국토관리청",
-                "한국토지주택공사(LH)",
-                "한국도로공사",
-                "국가철도공단",
-                "한국철도공사",
-                "한국수자원공사",
-                "직접 입력",
-            ]
-            selected_org_choice = st.selectbox("🏛️ 현장점검 기관", preset_orgs)
-            if selected_org_choice == "직접 입력":
-                custom_org_name = st.text_input("현장점검 기관명 직접 입력", placeholder="예: 대전지방국토관리청")
-                chck_inst_val = custom_org_name.strip()
-            elif selected_org_choice == "전체 (선택 안함)":
-                chck_inst_val = ""
-            else:
-                chck_inst_val = selected_org_choice
-
-        with c2:
-            regions = [
-                "전체",
-                "서울",
-                "부산",
-                "대구",
-                "인천",
-                "광주",
-                "대전",
-                "울산",
-                "세종",
-                "경기",
-                "강원",
-                "충북",
-                "충남",
-                "전북",
-                "전남",
-                "경북",
-                "경남",
-                "제주",
-            ]
-            search_region = st.selectbox("지역", regions)
-
-        chck_col1, chck_col2, c4, c5 = st.columns(4)
-        with chck_col1:
-            chck_start = st.date_input("현장점검예정일 (시작)", value=date(date.today().year, 1, 1))
-        with chck_col2:
-            chck_end = st.date_input("현장점검예정일 (종료)", value=date.today())
-        with c4:
-            const_nm = st.text_input("공사명 (선택)", placeholder="검색할 공사명")
-        with c5:
-            chck_nm = st.text_input("점검명 (선택)", placeholder="예: 8월 건설공사")
-
-        c6, c7 = st.columns(2)
-        with c6:
-            ord_corp_nm = st.text_input("발주자 (선택)", placeholder="예: 천안시청")
-        with c7:
-            con_corp = st.text_input("시공자 (선택)", placeholder="예: 롯데건설")
-
-        if st.button("🔎 위 조건으로 CSI 목록 검색하기", type="primary", disabled=not st.session_state.logged_in):
-            target_url = (
-                "https://www.csi.go.kr/spt/sptEndList.do"
-                if "sptEndList" in board_type
-                else "https://www.csi.go.kr/spt/sptTrgtList.do"
-            )
-            params = {
-                "chck_inst_nm": chck_inst_val,
-                "inst_nm": chck_inst_val,
-                "chck_inst": chck_inst_val,
-                "search_region": "" if search_region == "전체" else search_region,
-                "chck_start_ymd": chck_start.strftime("%Y%m%d") if chck_start else "",
-                "chck_end_ymd": chck_end.strftime("%Y%m%d") if chck_end else "",
-                "const_nm": const_nm.strip(),
-                "chck_nm": chck_nm.strip(),
-                "ord_corp_nm": ord_corp_nm.strip(),
-                "con_corp": con_corp.strip(),
-            }
-            with st.spinner(f"'{chck_inst_val or '전체'}' 기관 및 설정 조건으로 CSI 목록을 조회 중입니다..."):
+    col1, col2, col3 = st.columns([2, 2, 1.5])
+    with col1:
+        u_id = st.text_input("CSI 아이디 (선택)", placeholder="아이디 입력")
+    with col2:
+        u_pw = st.text_input("CSI 비밀번호 (선택)", type="password", placeholder="비밀번호 입력")
+    with col3:
+        st.write("")
+        if st.button("🌐 CSI 크롬 브라우저 열기", type="primary", use_container_width=True):
+            if st.session_state.driver:
                 try:
-                    t_pages, t_items = navigate_and_search(st.session_state.driver, target_url, params)
-                    st.session_state.total_pages = t_pages
-                    st.session_state.total_items = t_items
-                    exact_preview = get_current_page_items_exact(st.session_state.driver)
-                    st.session_state.preview_rows = [x["list_info"] for x in exact_preview]
-                except Exception as e:
-                    st.error(f"검색 실행 중 오류 발생: {e}")
+                    st.session_state.driver.quit()
+                except Exception:
+                    pass
+            with st.spinner("크롬 브라우저를 띄우는 중입니다..."):
+                drv = create_driver()
+                drv.get("https://www.csi.go.kr/spt/sptEndList.do")
+                if u_id.strip() and u_pw.strip():
+                    auto_login_csi(drv, u_id.strip(), u_pw.strip())
+                st.session_state.driver = drv
+                st.success("✅ 크롬 브라우저가 열렸습니다! 화면을 확인해주세요.")
 
-        if st.session_state.preview_rows or st.session_state.total_items > 0:
-            st.info(
-                f"📊 **검색 결과**: 총 **{st.session_state.total_items}개** 현장 / 전체 **{st.session_state.total_pages}페이지** (현재 1페이지 표시 건수: **{len(st.session_state.preview_rows)}건**)"
-            )
-            st.dataframe(pd.DataFrame(st.session_state.preview_rows), use_container_width=True, hide_index=True)
+# ----------------------------------------------------
+# 2단계: 사용자 검색 설정 안내
+# ----------------------------------------------------
+with st.container():
+    st.markdown("### 2️⃣ CSI 크롬 창에서 검색 조건 설정 및 검색 클릭")
+    st.info(
+        "💡 **진행 방법:**\n"
+        "1. 방금 열린 크롬 브라우저에서 **로그인**을 완료하세요.\n"
+        "2. 원하시는 **현장점검 기관, 지역, 기간 등 검색 조건**을 직접 선택하고 **[검색하기]** 버튼을 누르세요.\n"
+        "3. 하단에 검색 결과 목록(10개씩)이 정상적으로 표출된 것을 확인하셨다면 아래 3단계로 이동하세요."
+    )
 
-    # ----------------------------------------------------
-    # STEP 3: 전수 데이터 수집 및 긴급 정지 / 즉시 저장
-    # ----------------------------------------------------
-    with st.expander("📥 3단계: 현장점검 결과 수집 실행 및 엑셀 다운로드", expanded=True):
-        max_p = max(1, st.session_state.total_pages)
-        p_col1, p_col2, p_col3, p_col4 = st.columns([1, 1, 1.8, 1.2])
-        with p_col1:
-            start_page = st.number_input("수집 시작 페이지", min_value=1, max_value=max_p, value=1)
-        with p_col2:
-            end_page = st.number_input("수집 종료 페이지", min_value=1, max_value=max_p, value=max_p)
-        with p_col3:
-            st.write("")
-            start_collect_btn = st.button(
-                "⚡ 선택 페이지 수집 시작",
-                type="primary",
-                disabled=not st.session_state.logged_in,
-                use_container_width=True,
-            )
-        with p_col4:
-            st.write("")
-            # 사용자가 언제든 수집을 멈추고 현재까지 수집된 데이터를 바로 저장할 수 있는 정지 버튼
-            stop_btn = st.button("🛑 수집 정지 및 저장", use_container_width=True)
-            if stop_btn:
-                st.session_state.stop_requested = True
+# ----------------------------------------------------
+# 3단계: 자동 수집 실행 및 엑셀 다운로드
+# ----------------------------------------------------
+with st.container():
+    st.markdown("### 3️⃣ 자동 수집 실행 및 엑셀 저장")
 
-        if start_collect_btn:
+    c_p1, c_p2, c_btn1, c_btn2 = st.columns([1, 1, 1.8, 1.2])
+    with c_p1:
+        start_p = st.number_input("수집 시작 페이지", min_value=1, value=1)
+    with c_p2:
+        end_p = st.number_input("수집 종료 페이지", min_value=1, value=10)
+    with c_btn1:
+        st.write("")
+        start_collect = st.button("🚀 현재 화면부터 자동 수집 시작", type="primary", use_container_width=True)
+    with c_btn2:
+        st.write("")
+        if st.button("🛑 즉시 정지 및 저장", use_container_width=True):
+            st.session_state.stop_requested = True
+
+    if start_collect:
+        if not st.session_state.driver:
+            st.error("먼저 1단계에서 [CSI 크롬 브라우저 열기]를 눌러주세요.")
+        else:
             st.session_state.stop_requested = False
             driver = st.session_state.driver
-            collected = list(st.session_state.collected_sites)  # 기존 수집본이 있으면 누적
+            collected = list(st.session_state.collected_sites)
             progress_bar = st.progress(0)
             status_box = st.empty()
-            log_expander = st.expander("📜 실시간 수집 로그", expanded=True)
+            log_expander = st.expander("📜 실시간 수집 콘솔", expanded=True)
             log_area = log_expander.empty()
             logs = []
 
-            total_target_pages = max(1, int(end_page) - int(start_page) + 1)
+            total_pages = max(1, int(end_p) - int(start_p) + 1)
             interrupted = False
 
             try:
                 # 시작 페이지로 이동
-                if int(start_page) > 1:
-                    driver.execute_script(f"goPage('{int(start_page)}');")
-                    time.sleep(2.0)
+                if int(start_p) > 1:
+                    driver.execute_script(f"goPage('{int(start_p)}');")
+                    time.sleep(2.5)
 
-                for p_idx, curr_page in enumerate(range(int(start_page), int(end_page) + 1), start=1):
+                for p_idx, curr_page in enumerate(range(int(start_p), int(end_p) + 1), start=1):
                     if st.session_state.stop_requested:
                         interrupted = True
                         break
 
-                    status_box.info(f"🔄 **[페이지 {curr_page} / {int(end_page)}]** 현장 목록 탐색 중...")
-                    time.sleep(1.0)
+                    status_box.info(f"🔄 **[페이지 {curr_page} / {int(end_p)}]** 수집 진행 중...")
+                    time.sleep(1.8)
 
-                    # 현재 페이지에서 유효한 10개 현장 행을 정밀 추출
-                    page_items = get_current_page_items_exact(driver)
-                    row_count = len(page_items)
+                    # 1. 목록 테이블의 실제 현장 행 인덱스 추출 (원본 방식)
+                    raw_rows = driver.find_elements(By.XPATH, "//table//tbody//tr[td]")
+                    filtered_indices = []
+                    for idx, r in enumerate(raw_rows):
+                        cols = r.find_elements(By.TAG_NAME, "td")
+                        if len(cols) >= 7 and cols[0].text.strip().isdigit():
+                            filtered_indices.append(idx)
 
+                    row_count = len(filtered_indices)
                     if row_count == 0:
-                        logs.append(f"[페이지 {curr_page}] 현장 목록을 찾지 못하여 페이지 수집을 마칩니다.")
+                        logs.append(f"[페이지 {curr_page}] 현장 목록이 없어 수집을 마칩니다.")
                         log_area.code("\n".join(logs[-20:]))
                         break
 
-                    logs.append(f"📄 [페이지 {curr_page}] 실제 현장 건수: 정확히 {row_count}건 감지됨")
+                    logs.append(f"📄 [페이지 {curr_page}] 총 {row_count}개 현장 순회 시작")
                     log_area.code("\n".join(logs[-20:]))
 
-                    main_tab = driver.current_window_handle
-
-                    for order_idx, item in enumerate(page_items):
+                    # 2. 순차적으로 클릭 → 파싱 → 복귀 (원본 collector 검증 방식)
+                    for order_idx, orig_idx in enumerate(filtered_indices):
                         if st.session_state.stop_requested:
                             interrupted = True
                             break
 
-                        list_info = item["list_info"]
-                        target_row_idx = item["row_index"]
-
                         try:
-                            # 🚨 핵심: 매 현장 클릭 직전에 실시간 DOM에서 행과 링크를 새로 찾아옵니다 (Stale 완벽 방지)
-                            target_link = None
-                            retry_find = 0
-                            while retry_find < 3:
-                                try:
-                                    fresh_tables = driver.find_elements(
-                                        By.CSS_SELECTOR, "table.table, table.tbl, table.board, table.table-bordered"
-                                    )
-                                    for ftbl in fresh_tables:
-                                        frows = ftbl.find_elements(By.CSS_SELECTOR, "tbody tr")
-                                        if target_row_idx < len(frows):
-                                            frow = frows[target_row_idx]
-                                            flinks = frow.find_elements(By.TAG_NAME, "a")
-                                            if flinks:
-                                                target_link = flinks[0]
-                                                break
-                                    if target_link:
-                                        break
-                                except Exception:
-                                    pass
-                                time.sleep(0.3)
-                                retry_find += 1
+                            # 클릭 직전에 최신 행들을 다시 가져옴 (Stale 방지)
+                            curr_rows = driver.find_elements(By.XPATH, "//table//tbody//tr[td]")
+                            if orig_idx >= len(curr_rows):
+                                break
+                            target_row = curr_rows[orig_idx]
+                            cols = target_row.find_elements(By.TAG_NAME, "td")
 
-                            if not target_link:
-                                logs.append(f"  └ [알림] No.{list_info['No']} '{list_info['공사명']}' 링크를 찾지 못해 기본정보만 기록")
-                                log_area.code("\n".join(logs[-20:]))
+                            list_info = {
+                                "No": cols[0].text.strip(),
+                                "공사명": cols[1].text.strip() if len(cols) > 1 else "",
+                                "점검명": cols[2].text.strip() if len(cols) > 2 else "",
+                                "공사기간": cols[3].text.strip() if len(cols) > 3 else "",
+                                "현장주소": cols[4].text.strip() if len(cols) > 4 else "",
+                                "현장점검예정일": cols[5].text.strip() if len(cols) > 5 else "",
+                                "현장점검종류": cols[6].text.strip() if len(cols) > 6 else "",
+                                "발주자": cols[7].text.strip() if len(cols) > 7 else "",
+                                "목록_시공자": cols[8].text.strip() if len(cols) > 8 else "",
+                                "지적사항_조치완료": cols[9].text.strip() if len(cols) > 9 else "",
+                            }
+
+                            a_tags = target_row.find_elements(By.TAG_NAME, "a")
+                            if not a_tags:
                                 collected.append({"list_info": list_info, "parsed": {}})
                                 continue
 
-                            old_handles = driver.window_handles
-                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_link)
-                            time.sleep(0.1)
-                            driver.execute_script("arguments[0].click();", target_link)
-                            time.sleep(1.2)
+                            link_el = a_tags[0]
+                            main_win = driver.current_window_handle
+                            old_wins = driver.window_handles
 
-                            new_handles = driver.window_handles
-                            new_tabs = [h for h in new_handles if h != main_tab]
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", link_el)
+                            time.sleep(0.2)
+                            driver.execute_script("arguments[0].click();", link_el)
+                            time.sleep(2.0)
+
+                            new_wins = driver.window_handles
 
                             # 새 창/탭으로 열린 경우
-                            if new_tabs:
-                                detail_tab = new_tabs[0]
-                                driver.switch_to.window(detail_tab)
+                            if len(new_wins) > len(old_wins):
+                                new_tab = [w for w in new_wins if w not in old_wins][0]
+                                driver.switch_to.window(new_tab)
                                 parsed_detail = parse_detail_page(driver)
                                 driver.close()
-                                driver.switch_to.window(main_tab)
-                            # 동일 창에서 페이지 전환된 경우
+                                driver.switch_to.window(main_win)
+                            # 동일 창에서 페이지 이동된 경우 (원본 방식 복귀)
                             else:
                                 parsed_detail = parse_detail_page(driver)
                                 driver.back()
-                                time.sleep(1.5)
+                                time.sleep(2.0)
 
                             collected.append({"list_info": list_info, "parsed": parsed_detail})
                             st.session_state.collected_sites = collected
 
                             insp_cnt = len(parsed_detail.get("inspections", []))
                             logs.append(
-                                f"  └ [{order_idx + 1}/{row_count}] No.{list_info['No']} '{list_info['공사명']}' 수집 완료 (점검결과 {insp_cnt}건)"
+                                f"  └ [{order_idx + 1}/{row_count}] No.{list_info['No']} '{list_info['공사명']}' 완료 (점검결과 {insp_cnt}건)"
                             )
                             log_area.code("\n".join(logs[-20:]))
 
-                            done_ratio = ((p_idx - 1) + (order_idx + 1) / max(1, row_count)) / total_target_pages
+                            done_ratio = ((p_idx - 1) + (order_idx + 1) / max(1, row_count)) / total_pages
                             progress_bar.progress(min(1.0, done_ratio))
 
                         except Exception as row_err:
@@ -1356,87 +987,48 @@ with tab_auto:
                                 while len(driver.window_handles) > 1:
                                     driver.switch_to.window(driver.window_handles[-1])
                                     driver.close()
-                                driver.switch_to.window(main_tab)
+                                driver.switch_to.window(driver.window_handles[0])
                             except Exception:
                                 pass
 
                     # 다음 페이지 이동
-                    if not interrupted and curr_page < int(end_page):
-                        next_page_num = curr_page + 1
+                    if not interrupted and curr_page < int(end_p):
+                        next_p = curr_page + 1
                         try:
-                            driver.execute_script(f"goPage('{next_page_num}');")
-                            time.sleep(2.0)
+                            driver.execute_script(f"goPage('{next_p}');")
+                            time.sleep(2.5)
                         except Exception:
-                            page_btn = driver.find_elements(
-                                By.XPATH, f"//a[contains(@href, \"goPage('{next_page_num}')\")]"
+                            page_btns = driver.find_elements(
+                                By.XPATH, f"//a[contains(@href, \"goPage('{next_p}')\")]"
                             )
-                            if page_btn:
-                                driver.execute_script("arguments[0].click();", page_btn[0])
-                                time.sleep(2.0)
+                            if page_btns:
+                                driver.execute_script("arguments[0].click();", page_btns[0])
+                                time.sleep(2.5)
                             else:
                                 break
 
                 if interrupted:
                     status_box.warning(
-                        f"🛑 사용자에 의해 수집이 정지되었습니다. 현재까지 수집된 **{len(st.session_state.collected_sites)}건**의 데이터를 아래에서 바로 다운로드할 수 있습니다."
+                        f"🛑 사용자에 의해 정지되었습니다. 현재까지 수집된 **{len(st.session_state.collected_sites)}건**을 바로 다운로드할 수 있습니다."
                     )
                 else:
                     progress_bar.progress(1.0)
                     status_box.success(
-                        f"🎉 총 **{len(collected)}개** 현장 수집이 누락 없이 완료되었습니다! 아래에서 엑셀을 다운로드하세요."
+                        f"🎉 총 **{len(collected)}개** 현장 수집 완료! 아래 버튼으로 엑셀을 저장하세요."
                     )
 
             except Exception as e:
                 status_box.warning(
-                    f"⚠️ 작업 중 안내 ({e}). 현재까지 수집된 **{len(st.session_state.collected_sites)}건**의 데이터를 아래에서 바로 저장할 수 있습니다."
+                    f"⚠️ 안내: {e} (현재까지 수집된 **{len(st.session_state.collected_sites)}건** 다운로드 가능)"
                 )
 
-        # 수집된 데이터가 1건이라도 있으면 언제든지 다운로드 버튼 표출
-        if st.session_state.collected_sites:
-            excel_bytes, total_cols = generate_excel_bytes(st.session_state.collected_sites)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            st.download_button(
-                label=f"📥 현재까지 수집된 엑셀 파일 다운로드 (총 {len(st.session_state.collected_sites)}개 현장 / {total_cols}개 열)",
-                data=excel_bytes,
-                file_name=f"CSI_현장점검결과_수집_{ts}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True,
-            )
-
-with tab_html:
-    st.markdown("#### 📂 저장해 둔 현장점검 결과 HTML 파일들을 한 번에 엑셀로 변환")
-    st.caption(
-        "CSI 상세 페이지에서 `Ctrl + S`로 저장한 `.html` 파일을 1개 또는 여러 개 동시에 끌어다 놓으면, 각 현장을 한 행씩 배치하고 모든 항목을 개별 셀에 넣은 엑셀 파일을 즉시 생성합니다."
-    )
-
-    uploaded_files = st.file_uploader(
-        "현장점검 결과 HTML 파일 선택 (다중 선택 가능)",
-        type=["html", "htm"],
-        accept_multiple_files=True,
-    )
-
-    if uploaded_files:
-        html_sites = []
-        for uf in uploaded_files:
-            raw_bytes = uf.read()
-            try:
-                html_str = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError:
-                html_str = raw_bytes.decode("cp949", errors="replace")
-            parsed_item = parse_csi_detail_html(html_str)
-            html_sites.append({"list_info": {}, "parsed": parsed_item})
-
-        excel_bytes_html, total_cols_html = generate_excel_bytes(html_sites)
-        ts_html = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        st.success(
-            f"✅ 총 **{len(html_sites)}개** 현장 HTML 파일 분석 완료! (추출된 개별 셀 열 개수: **{total_cols_html}개**)"
-        )
+    if st.session_state.collected_sites:
+        excel_bytes, total_cols = generate_excel_bytes(st.session_state.collected_sites)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         st.download_button(
-            label=f"📥 변환된 엑셀 파일(.xlsx) 즉시 다운로드 ({len(html_sites)}건)",
-            data=excel_bytes_html,
-            file_name=f"CSI_현장점검결과_HTML변환_{ts_html}.xlsx",
+            label=f"📥 엑셀 파일 다운로드 (총 {len(st.session_state.collected_sites)}개 현장 / {total_cols}개 열)",
+            data=excel_bytes,
+            file_name=f"CSI_현장점검결과_수집_{ts}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True,
