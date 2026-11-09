@@ -278,48 +278,39 @@ def get_total_page_info(driver):
 
 def get_current_page_items_exact(driver):
     """
-    현재 페이지의 목록 테이블에서 연번(No)이 유효한 실제 현장 행(보통 10개)만 100% 정밀하게 추출합니다.
+    현재 페이지의 목록 테이블에서 실제 현장 행(No, 텍스트 정보)을 순수 데이터(dict) 형태로 추출합니다.
+    Selenium WebElement를 루프 바깥에 보관하지 않으므로 StaleElementReferenceException이 원천 차단됩니다.
     """
     exact_items = []
     try:
-        # 본문 목록 테이블의 tbody tr 탐색
         tables = driver.find_elements(
             By.CSS_SELECTOR, "table.table, table.tbl, table.board, table.table-bordered"
         )
         for tbl in tables:
             rows = tbl.find_elements(By.CSS_SELECTOR, "tbody tr")
-            temp_candidates = []
-            for r in rows:
+            for r_idx, r in enumerate(rows):
                 cols = r.find_elements(By.TAG_NAME, "td")
                 if len(cols) >= 7:
                     first_txt = cols[0].text.strip()
-                    # 첫 열이 숫자(연번 No)인 행만 현장 목록으로 판정
                     if first_txt.isdigit():
-                        temp_candidates.append((r, cols))
-            if temp_candidates:
-                for r, cols in temp_candidates:
-                    # 클릭할 a 링크 탐색
-                    a_links = r.find_elements(By.TAG_NAME, "a")
-                    target_link = a_links[0] if a_links else None
-
-                    exact_items.append(
-                        {
-                            "row_element": r,
-                            "link_element": target_link,
-                            "list_info": {
-                                "No": cols[0].text.strip(),
-                                "공사명": cols[1].text.strip() if len(cols) > 1 else "",
-                                "점검명": cols[2].text.strip() if len(cols) > 2 else "",
-                                "공사기간": cols[3].text.strip() if len(cols) > 3 else "",
-                                "현장주소": cols[4].text.strip() if len(cols) > 4 else "",
-                                "현장점검예정일": cols[5].text.strip() if len(cols) > 5 else "",
-                                "현장점검종류": cols[6].text.strip() if len(cols) > 6 else "",
-                                "발주자": cols[7].text.strip() if len(cols) > 7 else "",
-                                "목록_시공자": cols[8].text.strip() if len(cols) > 8 else "",
-                                "지적사항_조치완료": cols[9].text.strip() if len(cols) > 9 else "",
-                            },
-                        }
-                    )
+                        exact_items.append(
+                            {
+                                "row_index": r_idx,
+                                "list_info": {
+                                    "No": cols[0].text.strip(),
+                                    "공사명": cols[1].text.strip() if len(cols) > 1 else "",
+                                    "점검명": cols[2].text.strip() if len(cols) > 2 else "",
+                                    "공사기간": cols[3].text.strip() if len(cols) > 3 else "",
+                                    "현장주소": cols[4].text.strip() if len(cols) > 4 else "",
+                                    "현장점검예정일": cols[5].text.strip() if len(cols) > 5 else "",
+                                    "현장점검종류": cols[6].text.strip() if len(cols) > 6 else "",
+                                    "발주자": cols[7].text.strip() if len(cols) > 7 else "",
+                                    "목록_시공자": cols[8].text.strip() if len(cols) > 8 else "",
+                                    "지적사항_조치완료": cols[9].text.strip() if len(cols) > 9 else "",
+                                },
+                            }
+                        )
+            if exact_items:
                 break
     except Exception:
         pass
@@ -1266,36 +1257,55 @@ with tab_auto:
                             break
 
                         list_info = item["list_info"]
-                        target_link = item["link_element"]
+                        target_row_idx = item["row_index"]
 
                         try:
-                            # 🚨 핵심 개선: 뒤로가기(driver.back)를 쓰지 않고 새 탭(window.open)으로 격리 로딩!
-                            # 이렇게 하면 원래 목록 페이지의 검색 조건과 페이지 번호가 100% 온전히 유지됩니다.
-                            detail_url = target_link.get_attribute("href") if target_link else ""
-
-                            if detail_url and not detail_url.startswith("javascript"):
-                                driver.execute_script("window.open(arguments[0], '_blank');", detail_url)
-                            else:
-                                # 자바스크립트 링크인 경우 스크롤 후 클릭하여 새 탭 생성 유도
-                                old_handles = driver.window_handles
-                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_link)
-                                time.sleep(0.1)
-                                driver.execute_script("arguments[0].click();", target_link)
-                                time.sleep(1.0)
-                                new_handles = driver.window_handles
-                                if len(new_handles) == len(old_handles):
-                                    # 만약 현재 탭에서 직접 이동되었다면 강제로 새 탭 열기 복구
+                            # 🚨 핵심: 매 현장 클릭 직전에 실시간 DOM에서 행과 링크를 새로 찾아옵니다 (Stale 완벽 방지)
+                            target_link = None
+                            retry_find = 0
+                            while retry_find < 3:
+                                try:
+                                    fresh_tables = driver.find_elements(
+                                        By.CSS_SELECTOR, "table.table, table.tbl, table.board, table.table-bordered"
+                                    )
+                                    for ftbl in fresh_tables:
+                                        frows = ftbl.find_elements(By.CSS_SELECTOR, "tbody tr")
+                                        if target_row_idx < len(frows):
+                                            frow = frows[target_row_idx]
+                                            flinks = frow.find_elements(By.TAG_NAME, "a")
+                                            if flinks:
+                                                target_link = flinks[0]
+                                                break
+                                    if target_link:
+                                        break
+                                except Exception:
                                     pass
+                                time.sleep(0.3)
+                                retry_find += 1
 
-                            # 새 탭으로 전환
-                            all_handles = driver.window_handles
-                            new_tabs = [h for h in all_handles if h != main_tab]
+                            if not target_link:
+                                logs.append(f"  └ [알림] No.{list_info['No']} '{list_info['공사명']}' 링크를 찾지 못해 기본정보만 기록")
+                                log_area.code("\n".join(logs[-20:]))
+                                collected.append({"list_info": list_info, "parsed": {}})
+                                continue
+
+                            old_handles = driver.window_handles
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_link)
+                            time.sleep(0.1)
+                            driver.execute_script("arguments[0].click();", target_link)
+                            time.sleep(1.2)
+
+                            new_handles = driver.window_handles
+                            new_tabs = [h for h in new_handles if h != main_tab]
+
+                            # 새 창/탭으로 열린 경우
                             if new_tabs:
                                 detail_tab = new_tabs[0]
                                 driver.switch_to.window(detail_tab)
                                 parsed_detail = parse_detail_page(driver)
-                                driver.close()  # 상세 탭 닫기
-                                driver.switch_to.window(main_tab)  # 안전하게 원래 목록 탭으로 복귀
+                                driver.close()
+                                driver.switch_to.window(main_tab)
+                            # 동일 창에서 페이지 전환된 경우
                             else:
                                 parsed_detail = parse_detail_page(driver)
                                 driver.back()
@@ -1316,7 +1326,6 @@ with tab_auto:
                         except Exception as row_err:
                             logs.append(f"  └ [오류] {order_idx + 1}번째 현장 스킵: {row_err}")
                             log_area.code("\n".join(logs[-20:]))
-                            # 오류 발생 시 원래 목록 탭으로 복구
                             try:
                                 while len(driver.window_handles) > 1:
                                     driver.switch_to.window(driver.window_handles[-1])
