@@ -40,19 +40,29 @@ st.markdown(
 
 
 # ==========================================
-# 1. 크롬 브라우저 생성 (화면 표출 모드)
+# 1. 크롬 브라우저 생성 (환경 자동 감지: 로컬PC 창 표출 vs Streamlit Cloud 헤드리스)
 # ==========================================
 def create_driver():
     options = webdriver.ChromeOptions()
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--start-maximized")
 
-    # 브라우저 이미지 로딩 유지 (사람이 화면 볼 때 자연스럽게 렌더링)
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
+
+    # 리눅스 클라우드 서버 환경 감지 (/mount/src 또는 /usr/bin/chromium 존재 시)
+    is_server = os.path.exists("/usr/bin/chromium") or os.path.exists("/usr/bin/chromium-browser") or os.path.exists("/mount")
+
+    if is_server:
+        # 클라우드 서버는 모니터 화면(디스플레이)이 없으므로 반드시 헤드리스 모드로 실행되어야 세션 에러가 나지 않습니다.
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1600,1050")
+    else:
+        # 사용자 본인 로컬 PC(Windows/Mac)에서는 실제 크롬 창이 눈앞에 최대 크기로 뜹니다.
+        options.add_argument("--start-maximized")
 
     chromium_paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
     driver_paths = ["/usr/bin/chromedriver", "/usr/lib/chromium-browser/chromedriver"]
